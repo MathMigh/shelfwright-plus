@@ -1,0 +1,68 @@
+name: Ibn Arabi licensed IA individual transfer
+
+on:
+  push:
+    paths: ['.github/workflows/ibn-arabi-ia-licensed-individual-temp.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {rg: RG030, cls: A, slug: Anqa-Mughrib, id: '20230402_20230402_1024', license: 'CC-BY-NC-ND-4.0'}
+          - {rg: RG135, cls: A, slug: Futuhat-BULAC-1853, id: 'BULAC.RES.MON.Fol.53', license: 'Public-Domain-Mark'}
+          - {rg: RG315, cls: A, slug: Istilahat-al-Sufiyya-PD, id: '20260714_20260714_1352', license: 'Public-Domain-Mark'}
+          - {rg: RG432, cls: A, slug: Mashahid-al-Asrar-PD, id: 'Library.mmn_20150903', license: 'Public-Domain-Mark'}
+          - {rg: RG485, cls: A, slug: al-Mubashshirat-PD, id: '20240911_20240911_0123', license: 'Public-Domain-Mark'}
+          - {rg: RG493, cls: B, slug: Muhadarat-al-Abrar-CC0, id: '2_20250413_20250413_1837', license: 'CC0'}
+          - {rg: RG064, cls: P, slug: Awrad-1299H-PD, id: '1299_20221213', license: 'Public-Domain-Mark'}
+          - {rg: RG702, cls: P, slug: al-Salat-al-Faydiyya-PD, id: '20240507_20240507_1956', license: 'Public-Domain-Mark'}
+    steps:
+      - name: Fetch metadata and best PDF
+        shell: bash
+        env:
+          IA_ID: ${{ matrix.id }}
+          EXPECTED_LICENSE: ${{ matrix.license }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,json,urllib.request,urllib.parse
+          iid=os.environ['IA_ID']
+          with urllib.request.urlopen('https://archive.org/metadata/'+urllib.parse.quote(iid),timeout=60) as r: meta=json.load(r)
+          md=meta.get('metadata',{})
+          print('TITLE',md.get('title'))
+          print('CREATOR',md.get('creator'))
+          print('DATE',md.get('date'))
+          print('LICENSE',md.get('licenseurl'))
+          files=[]
+          for f in meta.get('files',[]):
+            n=f.get('name',''); s=int(f.get('size') or 0); src=f.get('source','')
+            if n.lower().endswith('.pdf') and s>0:
+              files.append((s,src,n))
+          for x in sorted(files,reverse=True): print('PDF_CANDIDATE',*x)
+          if not files: raise SystemExit('No PDF in item')
+          # Quality preference: original PDF if present; otherwise largest PDF derivative.
+          originals=[x for x in files if x[1]=='original']
+          pool=originals or files
+          s,src,name=max(pool)
+          print('SELECTED',s,src,name)
+          open('/tmp/selected.txt','w').write(name)
+          PY
+          name="$(cat /tmp/selected.txt)"
+          out='${{ matrix.rg }}_${{ matrix.cls }}_${{ matrix.slug }}.pdf'
+          curl -L --fail --retry 3 --retry-delay 3 --output "$out" "https://archive.org/download/${IA_ID}/$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$name")"
+          test "$(head -c 5 "$out")" = '%PDF-'
+          sha256sum "$out"
+          ls -lh "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ibn-arabi-${{ matrix.rg }}-${{ matrix.cls }}-${{ matrix.slug }}
+          path: ${{ matrix.rg }}_${{ matrix.cls }}_${{ matrix.slug }}.pdf
+          compression-level: 0
+          retention-days: 14
