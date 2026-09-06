@@ -1,0 +1,160 @@
+name: Ibn Arabi Arabic parallel bridge
+
+on:
+  push:
+    paths: ['.github/workflows/ibn-arabi-parallel-temp.yml']
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    outputs:
+      matrix: ${{ steps.make.outputs.matrix }}
+      selected: ${{ steps.make.outputs.selected }}
+    steps:
+      - id: make
+        name: Build 60-file Arabic source matrix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, urllib.parse, urllib.request
+          UA='Mozilla/5.0 (compatible; Shelfwright-IbnArabi-Matrix/1.0)'
+          def gj(u,t=45):
+            q=urllib.request.Request(u,headers={'User-Agent':UA})
+            with urllib.request.urlopen(q,timeout=t) as r:return json.load(r)
+          qs=[
+            'mediatype:texts AND language:ara AND creator:"محيي الدين ابن عربي"',
+            'mediatype:texts AND language:ara AND creator:"ابن عربي"',
+            'mediatype:texts AND language:ara AND creator:"Ibn Arabi"',
+            'mediatype:texts AND language:ara AND title:"ابن عربي"']
+          docs=[]; seen=set()
+          for q in qs:
+            p=urllib.parse.urlencode({'q':q,'fl[]':['identifier','title','creator','language'],'rows':200,'output':'json','sort[]':'downloads desc'},doseq=True)
+            try: ds=gj('https://archive.org/advancedsearch.php?'+p)['response']['docs']
+            except Exception as e: print('SEARCH_FAIL',repr(e)); continue
+            for d in ds:
+              i=d.get('identifier')
+              if i and i not in seen:seen.add(i);docs.append(d)
+          # Genuine/probable/attributed corpus keywords; deliberately reject works merely about Ibn Arabi.
+          work_terms=('الفتوحات','فصوص الحكم','محاضرة الأبرار','التدبيرات الإلهية','مواقع النجوم','كتاب اليقين','ترجمان الأشواق','ديوان','أوراد','رسائل ابن عربي','أجوبة ابن عربي','اصطلاحات','التنزلات','تنزّل الأملاك','حلية الابدال','حلية الأبدال','الإعلام بإشارات','ذخائر الاعلاق','ذخائر الأعلاق','التجليات','ماهية القلب','الوصايا','عقلة المستوفز','روح القدس','إنشاء الدوائر','عنقاء مغرب','كتاب الإسراء','الإسفار','مشكاة الأنوار','العبادلة','الحجب','مقام القربة','كتاب الهو','كتاب الباء','كتاب الألف','تاج التراجم','تاج الرسائل','الجلالة','الجلال والجمال','القطب','النقباء','كنه ما لابد','كنه ما لا بد','مشاهد الأسرار','المبادئ والغايات','المعشرات','المبشرات','الخلوة','الخرقة','الفناء في المشاهدة','أيام الشأن','القسم الإلهي','إجازة','فهرس مؤلفات')
+          bad=('دراسة','رسالة ماجستير','أطروحة','حول ابن عربي','فكر ابن عربي','فلسفة ابن عربي','حياته','مذهبه','عقيدة ابن عربي','تكفير ابن عربي','ذم ابن عربي','الرد على ابن عربي','موقف العلماء','سبينوزا','تحليل النص','التأويل','الإنسان الكامل عند','شرح كتاب مواقع النجوم','شرح الجامي','شرح فصوص','مناقشة','تنزيه ابن عربي','موطد الحكم','موطّد الحكم','إبطال مذهب','هل كان لدى','التفريق بين','تحذير العباد')
+          ranked=[]
+          for d in docs:
+            title=str(d.get('title') or ''); creator=' '.join(d.get('creator') if isinstance(d.get('creator'),list) else [str(d.get('creator') or '')])
+            if any(b in title for b in bad):continue
+            ch=('ابن عربي' in creator or 'بن عربي' in creator or 'Ibn Arabi' in creator or 'ibn arabi' in creator.lower())
+            wh=any(w in title for w in work_terms)
+            if not (ch or wh):continue
+            score=(20 if ch else 0)+(12 if wh else 0)+(8 if 'الفتوحات' in title else 0)+(4 if 'رسائل ابن عربي' in title else 0)
+            ranked.append((score,d))
+          ranked.sort(key=lambda z:z[0],reverse=True)
+          pieces=[]; keyseen=set()
+          for score,d in ranked:
+            if len(pieces)>=64:break
+            ident=d['identifier']; title=str(d.get('title') or ident)
+            try:m=gj('https://archive.org/metadata/'+urllib.parse.quote(ident,safe=''))
+            except Exception as e:print('META_FAIL',ident,repr(e));continue
+            fs=[]
+            for f in m.get('files',[]):
+              name=f.get('name',''); lo=name.lower()
+              if not lo.endswith('.pdf'):continue
+              try:size=int(f.get('size') or 0)
+              except:size=0
+              if not 80_000<=size<=180_000_000:continue
+              # Avoid derivative duplicates when source/main PDFs exist; still permit text PDF as last resort.
+              pen=(6 if lo.endswith('_text.pdf') else 0)+(3 if '_bw' in lo or 'bw.pdf' in lo else 0)+(2 if 'searchable' in lo else 0)
+              fs.append((pen,-size,name,size))
+            if not fs:continue
+            fs.sort()
+            # Multi-volume items are useful: retain up to 14 distinct main PDFs from one bibliographic item.
+            kept=0
+            for pen,neg,name,size in fs:
+              if kept>=14 or len(pieces)>=64:break
+              k=(ident,name)
+              if k in keyseen:continue
+              # Once a main PDF with a basename exists, suppress obvious OCR derivative of same basename.
+              stem=re.sub(r'(_text|_bw|_searchable)$','',os.path.splitext(name)[0].lower())
+              dup=False
+              for p in pieces:
+                if p['id']==ident and p['stem']==stem:dup=True;break
+              if dup:continue
+              keyseen.add(k); kept+=1
+              n=len(pieces)+1
+              url='https://archive.org/download/{}/{}'.format(urllib.parse.quote(ident,safe=''),urllib.parse.quote(name,safe='/'))
+              base=re.sub(r'[^0-9A-Za-z._-]+','_',os.path.basename(name))[-110:]
+              out=f'{n:03d}_{re.sub(r"[^0-9A-Za-z._-]+","_",ident)[:45]}_{base}'
+              if not out.lower().endswith('.pdf'):out+='.pdf'
+              pieces.append({'n':n,'id':ident,'title':title,'source':name,'url':url,'out':out,'bytes_expected':size,'stem':stem,'score':score})
+          # Fallback: allow additional eligible PDFs from already-approved items if first pass is short.
+          if len(pieces)<55:
+            print('WARNING only',len(pieces),'pieces from strict pass')
+          matrix=[{k:v for k,v in p.items() if k in ('n','id','title','source','url','out')} for p in pieces[:60]]
+          print('SELECTED',len(matrix))
+          for p in matrix:print('SEL',p['n'],p['id'],p['source'],p['title'])
+          if len(matrix)<50:raise SystemExit('strict matrix below 50')
+          with open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8') as g:
+            g.write('matrix='+json.dumps({'include':matrix},ensure_ascii=False,separators=(',',':'))+'\n')
+            g.write('selected='+str(len(matrix))+'\n')
+          PY
+
+  download:
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Download one public source PDF
+        shell: bash
+        env:
+          URL: ${{ matrix.url }}
+          OUT: ${{ matrix.out }}
+          TITLE: ${{ matrix.title }}
+          IDENT: ${{ matrix.id }}
+          SOURCE: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          mkdir one
+          curl -L --fail --retry 4 --retry-delay 2 --connect-timeout 20 --max-time 480 -A 'Mozilla/5.0 Shelfwright-IbnArabi/1.0' "$URL" -o "one/$OUT"
+          test "$(stat -c %s "one/$OUT")" -ge 80000
+          printf '%s\t%s\t%s\t%s\n' "$IDENT" "$TITLE" "$SOURCE" "$URL" > one/source.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: piece-${{ matrix.n }}
+          path: one/
+          compression-level: 0
+          retention-days: 7
+
+  aggregate:
+    if: always()
+    needs: [discover, download]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: piece-*
+          path: corpus
+          merge-multiple: false
+      - name: Validate fifty-plus PDFs and build manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          find corpus -type f -name '*.pdf' -print | sort > pdfs.txt
+          COUNT=$(wc -l < pdfs.txt | tr -d ' ')
+          echo "SUCCESSFUL_PDFS=$COUNT"
+          test "$COUNT" -ge 50
+          cp pdfs.txt corpus/00_filelist.txt
+          find corpus -type f -name source.tsv -print -exec cat {} \; > corpus/00_sources.tsv
+          du -sh corpus
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ibn-arabi-arabic-50plus
+          path: corpus/
+          compression-level: 0
+          retention-days: 7
