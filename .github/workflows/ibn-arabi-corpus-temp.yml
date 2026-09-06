@@ -11,45 +11,166 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - name: Collect publicly downloadable Arabic source files
+      - name: Collect public Arabic Ibn Arabi PDFs from Internet Archive
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p corpus
-          PAGE='https://sufism.ir/fa/library/ibn-arabi/'
-          curl -L --fail --retry 4 --connect-timeout 20 "$PAGE" -o page.html
-          python3 - <<'PY'
-          import html, re, urllib.parse
-          s=open('page.html','r',encoding='utf-8',errors='ignore').read()
-          s=html.unescape(s)
-          urls=[]
-          for m in re.finditer(r'''(?:href|src)=["']([^"']+)["']''', s, re.I):
-              u=urllib.parse.urljoin('https://sufism.ir/fa/library/ibn-arabi/', m.group(1))
-              lo=u.lower().split('?')[0]
-              if '/library-files/ibn-arabi/' in lo and lo.endswith(('.pdf','.doc','.docx','.zip')):
-                  if u not in urls: urls.append(u)
-          open('urls.txt','w').write('\n'.join(urls)+'\n')
-          print('discovered',len(urls),'download links')
+          cat > collect.py <<'PY'
+          import json, os, re, sys, time, unicodedata, urllib.parse, urllib.request
+
+          UA='Mozilla/5.0 (compatible; Shelfwright-IbnArabi-Corpus/1.0)'
+          def get_json(url, timeout=45):
+              req=urllib.request.Request(url, headers={'User-Agent':UA})
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  return json.load(r)
+
+          queries=[
+              'mediatype:texts AND language:ara AND creator:"محيي الدين بن عربي"',
+              'mediatype:texts AND language:ara AND creator:"محي الدين بن عربي"',
+              'mediatype:texts AND language:ara AND creator:"محيي الدين ابن عربي"',
+              'mediatype:texts AND language:ara AND creator:"ابن عربي"',
+              'mediatype:texts AND language:ara AND creator:"Ibn Arabi"',
+              'mediatype:texts AND language:ara AND creator:"Muhyiddin Ibn Arabi"',
+              'mediatype:texts AND language:ara AND title:"ابن عربي"',
+          ]
+          docs=[]; seen=set()
+          for q in queries:
+              params=urllib.parse.urlencode({
+                  'q':q,'fl[]':['identifier','title','creator','language','date'],
+                  'rows':200,'page':1,'output':'json','sort[]':'downloads desc'
+              }, doseq=True)
+              u='https://archive.org/advancedsearch.php?'+params
+              try:
+                  js=get_json(u)
+              except Exception as e:
+                  print('SEARCH_FAIL',q,e,file=sys.stderr); continue
+              found=js.get('response',{}).get('docs',[])
+              print('QUERY',q,'FOUND',len(found))
+              for d in found:
+                  ident=d.get('identifier')
+                  if ident and ident not in seen:
+                      seen.add(ident); docs.append(d)
+
+          arabic=re.compile(r'[\u0600-\u06FF]')
+          bad_title_terms=['شرح فصوص الحكم للقاشاني','القاشاني','الشعراني','دراسة','رسالة ماجستير','أطروحة','حول ابن عربي','فكر ابن عربي','مذهب ابن عربي','فلسفة ابن عربي']
+          def norm(s):
+              s=unicodedata.normalize('NFKC',str(s or '')).strip().lower()
+              s=re.sub(r'[\s\-_–—:،,.;؛]+',' ',s)
+              return s
+
+          # First pass: prefer items whose creator metadata itself names Ibn Arabi.
+          ranked=[]
+          for d in docs:
+              title=str(d.get('title') or '')
+              creator=' '.join(d.get('creator') if isinstance(d.get('creator'),list) else [str(d.get('creator') or '')])
+              nt=norm(title); nc=norm(creator)
+              if any(x in nt for x in bad_title_terms):
+                  continue
+              creator_hit=('ابن عربي' in nc or 'بن عربي' in nc or 'ibn arabi' in nc or 'ibn ʿarabi' in nc)
+              arabic_title=bool(arabic.search(title))
+              score=(10 if creator_hit else 0)+(3 if arabic_title else 0)
+              ranked.append((score,d))
+          ranked.sort(key=lambda x:x[0], reverse=True)
+
+          manifest=[]; successful=0; title_seen=set(); deferred=[]
+          for score,d in ranked:
+              if successful>=65: break
+              ident=d['identifier']; title=str(d.get('title') or ident); nt=norm(title)
+              # First 50 should favor distinct bibliographic titles; defer repeats.
+              if nt in title_seen:
+                  deferred.append((score,d)); continue
+              try:
+                  md=get_json('https://archive.org/metadata/'+urllib.parse.quote(ident,safe=''))
+              except Exception as e:
+                  print('META_FAIL',ident,e,file=sys.stderr); continue
+              files=[]
+              for f in md.get('files',[]):
+                  name=f.get('name',''); low=name.lower()
+                  if not low.endswith('.pdf'): continue
+                  try: size=int(f.get('size') or 0)
+                  except: size=0
+                  if size<50_000 or size>350_000_000: continue
+                  # Prefer human/source PDFs; avoid tiny derivative OCR when alternatives exist.
+                  penalty=0
+                  if low.endswith('_text.pdf'): penalty+=2
+                  if 'bw.pdf' in low or 'bw_' in low: penalty+=1
+                  files.append((penalty,-size,name,size))
+              if not files: continue
+              files.sort()
+              name=files[0][2]; size=files[0][3]
+              url='https://archive.org/download/{}/{}'.format(urllib.parse.quote(ident,safe=''), urllib.parse.quote(name,safe='/'))
+              ext='.pdf'
+              safe=re.sub(r'[^0-9A-Za-z\u0600-\u06FF._ -]+','_',title).strip()[:150]
+              out='corpus/{:03d}_{}.pdf'.format(successful+1,safe or ident)
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':UA})
+                  with urllib.request.urlopen(req,timeout=90) as r, open(out,'wb') as w:
+                      while True:
+                          b=r.read(1024*1024)
+                          if not b: break
+                          w.write(b)
+                  got=os.path.getsize(out)
+                  if got<50_000: raise RuntimeError('too small')
+              except Exception as e:
+                  try: os.remove(out)
+                  except: pass
+                  print('DL_FAIL',ident,name,e,file=sys.stderr); continue
+              successful+=1; title_seen.add(nt)
+              manifest.append({'n':successful,'identifier':ident,'title':title,'creator':d.get('creator'),'source_file':name,'bytes':got,'url':url,'local':out,'score':score})
+              print('OK',successful,got,ident,title)
+
+          # If distinct-title pass is below target, permit alternate editions.
+          if successful<55:
+              for score,d in deferred:
+                  if successful>=65: break
+                  ident=d['identifier']; title=str(d.get('title') or ident)
+                  try: md=get_json('https://archive.org/metadata/'+urllib.parse.quote(ident,safe=''))
+                  except: continue
+                  candidates=[]
+                  for f in md.get('files',[]):
+                      name=f.get('name',''); low=name.lower()
+                      if not low.endswith('.pdf'): continue
+                      try:size=int(f.get('size') or 0)
+                      except:size=0
+                      if 50_000<=size<=350_000_000:
+                          candidates.append((2 if low.endswith('_text.pdf') else 0,-size,name,size))
+                  if not candidates: continue
+                  candidates.sort(); name=candidates[0][2]
+                  url='https://archive.org/download/{}/{}'.format(urllib.parse.quote(ident,safe=''),urllib.parse.quote(name,safe='/'))
+                  safe=re.sub(r'[^0-9A-Za-z\u0600-\u06FF._ -]+','_',title).strip()[:150]
+                  out='corpus/{:03d}_{}.pdf'.format(successful+1,safe or ident)
+                  try:
+                      req=urllib.request.Request(url,headers={'User-Agent':UA})
+                      with urllib.request.urlopen(req,timeout=90) as r, open(out,'wb') as w:
+                          while True:
+                              b=r.read(1024*1024)
+                              if not b: break
+                              w.write(b)
+                      got=os.path.getsize(out)
+                      if got<50_000: raise RuntimeError
+                  except Exception:
+                      try:os.remove(out)
+                      except:pass
+                      continue
+                  successful+=1
+                  manifest.append({'n':successful,'identifier':ident,'title':title,'creator':d.get('creator'),'source_file':name,'bytes':got,'url':url,'local':out,'score':score,'alternate_edition':True})
+                  print('ALT_OK',successful,got,ident,title)
+
+          with open('corpus/00_manifest.json','w',encoding='utf-8') as f:
+              json.dump(manifest,f,ensure_ascii=False,indent=2)
+          with open('corpus/00_manifest.tsv','w',encoding='utf-8') as f:
+              f.write('n\tidentifier\ttitle\tcreator\tbytes\turl\n')
+              for x in manifest:
+                  f.write('{}\t{}\t{}\t{}\t{}\t{}\n'.format(x['n'],x['identifier'],str(x['title']).replace('\t',' '),str(x.get('creator','')).replace('\t',' '),x['bytes'],x['url']))
+          print('SUCCESSFUL_FILES',successful)
+          if successful<50:
+              raise SystemExit('fewer than 50 PDFs collected')
           PY
-          : > manifest.tsv
-          n=0
-          while IFS= read -r url; do
-            [ -n "$url" ] || continue
-            n=$((n+1))
-            base="$(python3 -c 'import sys,urllib.parse,os; print(os.path.basename(urllib.parse.urlparse(sys.argv[1]).path) or ("item-%03d"%int(sys.argv[2])))' "$url" "$n")"
-            out="corpus/$(printf '%03d' "$n")_$base"
-            if curl -L --fail --retry 3 --connect-timeout 20 --max-time 240 "$url" -o "$out"; then
-              bytes=$(stat -c %s "$out")
-              printf '%03d\t%s\t%s\t%s\n' "$n" "$bytes" "$out" "$url" >> manifest.tsv
-            else
-              rm -f "$out"
-              printf '%03d\tFAILED\t%s\t%s\n' "$n" "$out" "$url" >> manifest.tsv
-            fi
-          done < urls.txt
-          cp manifest.tsv corpus/00_manifest.tsv
-          echo "Downloaded files: $(find corpus -maxdepth 1 -type f ! -name '00_manifest.tsv' | wc -l)"
+          python3 collect.py
+          echo "PDF count: $(find corpus -maxdepth 1 -type f -name '*.pdf' | wc -l)"
           du -sh corpus
 
       - name: Upload corpus artifact
@@ -61,4 +182,4 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-# trigger: 2
+# trigger: internet-archive-v1
