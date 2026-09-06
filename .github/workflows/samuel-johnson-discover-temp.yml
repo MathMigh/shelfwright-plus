@@ -1,0 +1,49 @@
+name: Samuel Johnson discovery bridge
+
+on:
+  push:
+    paths: ['.github/workflows/samuel-johnson-discover-temp.yml']
+permissions:
+  contents: read
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Discover public-domain Samuel Johnson scans
+        shell: python
+        run: |
+          import json, urllib.parse, urllib.request, os
+          UA='Mozilla/5.0 (compatible; Shelfwright-SamuelJohnson-Discovery/1.0)'
+          def gj(u):
+            q=urllib.request.Request(u,headers={'User-Agent':UA})
+            with urllib.request.urlopen(q,timeout=35) as r:return json.load(r)
+          queries=[
+            'mediatype:texts AND creator:"Johnson, Samuel, 1709-1784"',
+            'mediatype:texts AND creator:"Johnson, Samuel, 1709-1784."',
+            'mediatype:texts AND creator:"Samuel Johnson" AND year:[1700 TO 1929]',
+            'mediatype:texts AND title:"The works of Samuel Johnson"',
+            'mediatype:texts AND title:"A dictionary of the English language" AND creator:"Johnson, Samuel"',
+            'mediatype:texts AND title:"The plays of William Shakespeare" AND creator:"Johnson, Samuel"'
+          ]
+          out={}
+          for q in queries:
+            p=urllib.parse.urlencode({'q':q,'fl[]':['identifier','title','creator','date','year','volume','publisher','language','downloads'],'rows':200,'output':'json','sort[]':'downloads desc'},doseq=True)
+            try:d=gj('https://archive.org/advancedsearch.php?'+p)['response']['docs']
+            except Exception as e:print('FAIL',q,repr(e));continue
+            print('QUERY',len(d),q)
+            for x in d:
+              if x.get('identifier'):out[x['identifier']]=x
+          os.makedirs('out',exist_ok=True)
+          docs=list(out.values())
+          with open('out/catalog.json','w',encoding='utf8') as f:json.dump(docs,f,ensure_ascii=False,indent=2)
+          with open('out/catalog.tsv','w',encoding='utf8') as f:
+            f.write('identifier\ttitle\tcreator\tdate\tvolume\tpublisher\tdownloads\n')
+            for x in docs:
+              f.write('\t'.join(str(x.get(k,'')).replace('\t',' ') for k in ['identifier','title','creator','date','volume','publisher','downloads'])+'\n')
+          print('UNIQUE',len(docs))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: samuel-johnson-discovery-catalog
+          path: out/
+          retention-days: 7
