@@ -1,0 +1,75 @@
+name: Ibn Arabi MIAS exact corpus search
+
+on:
+  push:
+    paths: ['.github/workflows/ibn-arabi-mias-exact-search-temp.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Exact-search every MIAS A B P title in Internet Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q requests rapidfuzz
+          cat > /tmp/search.py <<'PY'
+          import csv,json,re,time,requests
+          from pathlib import Path
+          from rapidfuzz.fuzz import token_set_ratio
+          S=requests.Session();S.headers.update({'User-Agent':'Mozilla/5.0 scholarly-corpus-research'})
+          targets=[
+          ('RG002','A','العبادلة'),('RG026','A','الألف الأحدية'),('RG028','A','الأمر المحكم'),('RG030','A','عنقاء مغرب'),('RG033','A','الأنوار'),('RG067','A','أيام الشأن'),('RG068','A','الأزل'),('RG070','A','العظمة'),('RG071','A','الباء'),('RG102','A','الديوان الكبير'),('RG116','A','ذخائر الأعلاق'),('RG125','A','الفناء في المشاهدة'),('RG132','A','تفسير فاتحة الكتاب'),('RG135','A','الفتوحات المكية'),('RG142','A','الفهرس'),('RG150','A','فصوص الحكم'),('RG168','A','الجلال والجمال'),('RG169','A','الجلالة'),('RG177','A','الجواب المستقيم'),('RG182','A','جواب سؤال ابن سودكين'),('RG205','A','الهو'),('RG219','A','الحق'),('RG237','A','حلية الأبدال'),('RG247','A','الحجب'),('RG255','A','الخلوة'),('RG266','A','الإفادة'),('RG268','A','إيجاز البيان'),('RG271','A','إجازة الشيخ الأكبر'),('RG281','A','الإعلام بإشارات أهل الإلهام'),('RG289','A','إنشاء الدوائر'),('RG303','A','إشارات القرآن'),('RG307','A','الإسفار عن نتائج الأسفار'),('RG313','A','الإسراء إلى المقام الأسرى'),('RG315','A','اصطلاحات الصوفية'),('RG317','A','الاتحاد الكوني'),('RG352','A','كنه ما لا بد للمريد منه'),('RG380','A','المبادئ والغايات'),('RG386','A','مفاتيح الغيوب'),('RG392','A','المحجة البيضاء'),('RG402','A','المعلوم من عقائد علماء الرسوم'),('RG412','A','منزل المنازل'),('RG414','A','مقام القربة'),('RG418','A','مقصد الأسماء'),('RG423','A','مراتب علوم الوهب'),('RG432','A','مشاهد الأسرار القدسية'),('RG433','A','المسائل'),('RG443','A','مواقع النجوم'),('RG462','A','الميم والواو والنون'),('RG480','A','مشكاة الأنوار'),('RG484','A','المعشرات'),('RG485','A','المبشرات'),('RG511','A','المقنع'),('RG517','A','الموشحات الإلهية والأزجال'),('RG528','A','نقش الفصوص'),('RG530','A','الخرقة'),('RG532','A','النصائح'),('RG536','A','نتائج الأذكار'),('RG548','A','النقباء'),('RG551','A','نسخة الحق'),('RG565','A','القسم الإلهي'),('RG585','A','القطب والإمامين'),('RG639','A','روح القدس'),('RG681','A','شرح خلع النعلين'),('RG689','A','شواهد الحق في القلب'),('RG716','A','التدبيرات الإلهية'),('RG736','A','تاج الرسائل'),('RG737','A','تاج التراجم'),('RG738','A','التجليات'),('RG762','A','التنزلات الموصلية'),('RG767','A','ترجمان الأشواق'),('RG802','A','عقلة المستوفز'),('RG826','A','الوعظ لبعض أحبابه'),('RG834','A','اليقين'),
+          ('RG009','B','الأجوبة'),('RG035','B','الأقطاب'),('RG269','B','إجازة للملك المظفر'),('RG276','B','اختصار السيرة النبوية المحمدية'),('RG294','B','الانتصار'),('RG338','B','كشف المعنى'),('RG347.1','B','الكوكب الدري في مناقب ذي النون المصري'),('RG354','B','الكتب'),('RG368.1','B','لواقح الأنوار'),('RG493','B','محاضرة الأبرار'),('RG496','B','مختصر الدرة الفاخرة'),('RG611','B','رسالة إلى أبي علي الغزالي'),('RG612','B','رسالة إلى الرازي'),('RG847','B','جواب ونصيحة للسلطان عز الدين كيكاوس'),
+          ('RG064','P','أوراد الأسبوع'),('RG188.1','P','الجزء الأول من تفسير كلام الله'),('RG238','P','حزب الأحدية'),('RG244','P','حزب الوقاية'),('RG384','P','مدخل في علم الحروف'),('RG428','P','معرفة ليلة القدر'),('RG702','P','الصلاة الفيضية'),('RG748','P','تخميس قصيدة أبي مدين'),('RG821','P','وصية في كيفية حصول المعرفة القصوى')]
+          def norm(s):
+            s=str(s or '');s=re.sub(r'[\u064b-\u065f\u0670\u06d6-\u06ed]','',s)
+            s=s.translate(str.maketrans({'أ':'ا','إ':'ا','آ':'ا','ٱ':'ا','ى':'ي','ة':'ه','ؤ':'و','ئ':'ي','ـ':''}))
+            s=re.sub(r'[^؀-ۿA-Za-z0-9 ]+',' ',s);return re.sub(r'\s+',' ',s).strip().lower()
+          def query_for(title):
+            # strip generic opening nouns; keep distinctive terms
+            words=[w for w in title.split() if w not in {'كتاب','رسالة','في','من','إلى','الى','وهو'}]
+            return ' '.join(words)
+          out=[]
+          api='https://archive.org/advancedsearch.php'
+          for idx,(rg,cl,title) in enumerate(targets,1):
+            qtxt=query_for(title)
+            q=f'mediatype:texts AND title:({qtxt})'
+            params={'q':q,'fl[]':['identifier','title','creator','date','language','licenseurl','collection','description','downloads'],'rows':15,'page':1,'output':'json'}
+            try:
+              r=S.get(api,params=params,timeout=45);r.raise_for_status();docs=r.json().get('response',{}).get('docs',[])
+            except Exception as e:
+              print('SEARCH_ERR',rg,repr(e));continue
+            ranked=[]
+            nt=norm(title)
+            for d in docs:
+              raw=d.get('title',''); raw=' '.join(map(str,raw)) if isinstance(raw,list) else str(raw)
+              cr=d.get('creator','');cr=' '.join(map(str,cr)) if isinstance(cr,list) else str(cr)
+              sim=token_set_ratio(nt,norm(raw))
+              author= any(x in norm(cr+' '+raw) for x in [norm('ابن عربي'),norm('محي الدين ابن عربي'),norm('ibn arabi'),norm('muhyiddin ibn arabi')])
+              # penalty for obvious secondary genres
+              sec=any(x in norm(raw) for x in [norm('دراسة'),norm('شرح فصوص'),norm('الرد على ابن عربي'),norm('حياة ابن عربي'),norm('فكر ابن عربي'),norm('عقيدة ابن عربي'),norm('رسالة ماجستير'),norm('تحليل')])
+              score=sim+(10 if author else 0)-(25 if sec else 0)
+              ranked.append((score,sim,author,sec,d,raw,cr))
+            ranked.sort(key=lambda z:z[0],reverse=True)
+            print('\nTARGET',idx,rg,cl,title,'QUERY',qtxt,'DOCS',len(docs))
+            for rank,z in enumerate(ranked[:5],1):
+              score,sim,author,sec,d,raw,cr=z
+              rec={'rg':rg,'class':cl,'work_title':title,'rank':rank,'score':round(score,1),'similarity':round(sim,1),'author_evidence':author,'secondary_penalty':sec,'identifier':d.get('identifier',''),'candidate_title':raw,'creator':cr,'date':d.get('date',''),'language':d.get('language',''),'licenseurl':d.get('licenseurl',''),'collection':d.get('collection',''),'downloads':d.get('downloads','')}
+              out.append(rec)
+              print(' ',rank,round(score,1),d.get('identifier',''),'|',raw,'| creator=',cr,'| date=',d.get('date',''),'| license=',d.get('licenseurl',''))
+            time.sleep(.06)
+          Path('out').mkdir(exist_ok=True)
+          fields=['rg','class','work_title','rank','score','similarity','author_evidence','secondary_penalty','identifier','candidate_title','creator','date','language','licenseurl','collection','downloads']
+          with open('out/mias_exact_candidates.csv','w',newline='',encoding='utf-8-sig') as f:
+            w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(out)
+          Path('out/targets.json').write_text(json.dumps([{'rg':a,'class':b,'title':c} for a,b,c in targets],ensure_ascii=False,indent=2),encoding='utf-8')
+          print('\nTARGETS_TOTAL',len(targets),'ROWS',len(out))
+          PY
+          python3 /tmp/search.py
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-mias-exact-candidates, path: out/, retention-days: 14}
