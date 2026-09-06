@@ -37,13 +37,36 @@ jobs:
     steps:
       - name: Download and verify PDF
         shell: bash
+        env:
+          URL: ${{ matrix.url }}
+          OUT: ${{ matrix.rg }}_${{ matrix.cls }}_${{ matrix.slug }}.pdf
         run: |
           set -euo pipefail
-          file='${{ matrix.rg }}_${{ matrix.cls }}_${{ matrix.slug }}.pdf'
-          curl -L --fail --retry 3 --retry-delay 2 --output "$file" '${{ matrix.url }}'
-          test "$(head -c 5 "$file")" = '%PDF-'
-          sha256sum "$file"
-          ls -lh "$file"
+          python3 - <<'PY'
+          import os,requests,hashlib,time
+          url=os.environ['URL']; out=os.environ['OUT']
+          h={'User-Agent':'Mozilla/5.0 corpus-research/1.0','Referer':'https://sufism.ir/fa/library/ibn-arabi/'}
+          last=None
+          for attempt in range(4):
+              try:
+                  with requests.get(url,headers=h,stream=True,timeout=120) as r:
+                      r.raise_for_status()
+                      with open(out,'wb') as f:
+                          for ch in r.iter_content(1024*1024):
+                              if ch: f.write(ch)
+                  break
+              except Exception as e:
+                  last=e
+                  if attempt==3: raise
+                  time.sleep(2*(attempt+1))
+          with open(out,'rb') as f:
+              head=f.read(5)
+          if head!=b'%PDF-': raise SystemExit(f'Not PDF: {head!r}')
+          hsh=hashlib.sha256()
+          with open(out,'rb') as f:
+              for ch in iter(lambda:f.read(1024*1024),b''):hsh.update(ch)
+          print('BYTES',os.path.getsize(out),'SHA256',hsh.hexdigest(),'URL',url)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: ibn-arabi-${{ matrix.rg }}-${{ matrix.cls }}-${{ matrix.slug }}
