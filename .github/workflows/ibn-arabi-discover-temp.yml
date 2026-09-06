@@ -2,45 +2,36 @@ name: Ibn Arabi Arabic discovery bridge
 
 on:
   push:
-    paths:
-      - '.github/workflows/ibn-arabi-discover-temp.yml'
-
+    paths: ['.github/workflows/ibn-arabi-discover-temp.yml']
 permissions:
   contents: read
-
 jobs:
-  discover:
+  inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Enumerate Internet Archive Arabic candidates
+      - name: Inspect key Arabic corpus items
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, urllib.parse, urllib.request
-          UA='Mozilla/5.0 (compatible; Shelfwright-IbnArabi-Discovery/1.0)'
-          qs=[
-            'mediatype:texts AND language:ara AND creator:"محيي الدين بن عربي"',
-            'mediatype:texts AND language:ara AND creator:"محي الدين بن عربي"',
-            'mediatype:texts AND language:ara AND creator:"محيي الدين ابن عربي"',
-            'mediatype:texts AND language:ara AND creator:"ابن عربي"',
-            'mediatype:texts AND language:ara AND creator:"Ibn Arabi"',
-            'mediatype:texts AND language:ara AND title:"ابن عربي"'
-          ]
-          seen=set(); out=[]
-          for q in qs:
-            p=urllib.parse.urlencode({'q':q,'fl[]':['identifier','title','creator','language'],'rows':200,'page':1,'output':'json','sort[]':'downloads desc'},doseq=True)
-            req=urllib.request.Request('https://archive.org/advancedsearch.php?'+p,headers={'User-Agent':UA})
+          import json, urllib.request, urllib.parse
+          UA='Mozilla/5.0 (compatible; Shelfwright-IbnArabi-Inspector/1.0)'
+          ids=['Majmua_Rasail_ibn_Arabi','20210411_1202','Rasail_Ibn_Arabi','20260610_20260610_1450','ibn_arabi','FUTOOHAT','20240415_20240415_0159','ar117myst90','ar117myst94','20240303_20240303_1135','20241114_20241114_1606','20241114_20241114_1604','20251202_20251202_1447']
+          for ident in ids:
+            u='https://archive.org/metadata/'+urllib.parse.quote(ident,safe='')
             try:
-              with urllib.request.urlopen(req,timeout=45) as r: js=json.load(r)
+              rq=urllib.request.Request(u,headers={'User-Agent':UA})
+              with urllib.request.urlopen(rq,timeout=45) as r:m=json.load(r)
             except Exception as e:
-              print('QFAIL',q,repr(e)); continue
-            ds=js.get('response',{}).get('docs',[]); print('QCOUNT',len(ds),q)
-            for d in ds:
-              i=d.get('identifier')
-              if i and i not in seen:
-                seen.add(i); out.append(d)
-          print('UNIQUE',len(out))
-          for n,d in enumerate(out[:150],1):
-            print('CAND\t%03d\t%s\t%s\t%s' % (n,d.get('identifier',''),str(d.get('title','')).replace('\t',' '),str(d.get('creator','')).replace('\t',' ')))
+              print('ITEMFAIL',ident,repr(e));continue
+            md=m.get('metadata',{}); print('\nITEM',ident,'TITLE',md.get('title'),'CREATOR',md.get('creator'))
+            fs=[]
+            for f in m.get('files',[]):
+              n=f.get('name',''); fmt=f.get('format','');
+              try:s=int(f.get('size') or 0)
+              except:s=0
+              if n.lower().endswith(('.pdf','.epub','.txt','.zip','.rar','.7z','.djvu','.sqlite','.db')) or fmt in ('Text PDF','PDF','EPUB','DjVuTXT'):
+                fs.append((s,n,fmt))
+            for s,n,fmt in sorted(fs,reverse=True)[:40]:
+              print('FILE',s,fmt,n)
           PY
