@@ -1,0 +1,117 @@
+name: Samuel Johnson fast corpus bridge
+
+on:
+  push:
+    paths: ['.github/workflows/samuel-johnson-fast-temp.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Collect public-domain Samuel Johnson PDFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p corpus
+          python3 - <<'PY'
+          import json, os, re, urllib.parse, urllib.request, unicodedata, time
+          UA='Mozilla/5.0 (compatible; Shelfwright-SamuelJohnson-Fast/1.0)'
+          def gj(u,t=45):
+            q=urllib.request.Request(u,headers={'User-Agent':UA})
+            with urllib.request.urlopen(q,timeout=t) as r:return json.load(r)
+          queries=[
+            'mediatype:texts AND creator:"Johnson, Samuel, 1709-1784"',
+            'mediatype:texts AND creator:"Johnson, Samuel, 1709-1784."',
+            'mediatype:texts AND creator:"Samuel Johnson" AND year:[1700 TO 1929]',
+            'mediatype:texts AND title:"The works of Samuel Johnson" AND year:[1787 TO 1929]',
+            'mediatype:texts AND title:"The plays of William Shakespeare" AND creator:"Johnson, Samuel"',
+            'mediatype:texts AND title:"A dictionary of the English language" AND creator:"Johnson, Samuel"'
+          ]
+          docs=[]; ids=set()
+          for q in queries:
+            p=urllib.parse.urlencode({'q':q,'fl[]':['identifier','title','creator','language','date','year','volume','publisher','downloads'],'rows':250,'output':'json','sort[]':'downloads desc'},doseq=True)
+            try:d=gj('https://archive.org/advancedsearch.php?'+p)['response']['docs']
+            except Exception as e:print('SEARCH_FAIL',repr(e));continue
+            for x in d:
+              i=x.get('identifier')
+              if i and i not in ids:ids.add(i);docs.append(x)
+          def txt(v):
+            if isinstance(v,list): return ' '.join(map(str,v))
+            return str(v or '')
+          def norm(s):
+            s=unicodedata.normalize('NFKC',txt(s)).lower().strip()
+            return re.sub(r'[^a-z0-9]+',' ',s).strip()
+          bad=('life of samuel johnson','boswell','biography','critical study','bibliography of','dictionary of national biography','selected writings','modern library','penguin','yale edition','oxford authors','cambridge companion','johnsonian','samuel johnson society')
+          ranked=[]
+          for x in docs:
+            title=txt(x.get('title')); creator=txt(x.get('creator')); nt=norm(title); nc=norm(creator)
+            if any(b in nt for b in bad):continue
+            hit=('johnson samuel 1709 1784' in nc or nc=='samuel johnson' or nc.startswith('johnson samuel'))
+            if not hit and not nt.startswith('the works of samuel johnson'):continue
+            y=str(x.get('year') or x.get('date') or '')[:4]
+            try:yi=int(y)
+            except:yi=0
+            # favor earlier/public-domain bibliographic editions; keep high-download scans
+            dl=x.get('downloads') or 0
+            try:dl=int(dl)
+            except:dl=0
+            score=(50 if hit else 0)+(20 if 1700<=yi<=1900 else 0)+(10 if yi and yi<=1929 else 0)+min(20,dl//100)
+            ranked.append((score,x))
+          ranked.sort(key=lambda z:z[0],reverse=True)
+          done=[]; keys=set()
+          for score,x in ranked:
+            if len(done)>=42:break
+            ident=x['identifier']; title=txt(x.get('title')) or ident; vol=txt(x.get('volume'))
+            key=(norm(title),norm(vol))
+            if key in keys:continue
+            try:m=gj('https://archive.org/metadata/'+urllib.parse.quote(ident,safe=''))
+            except Exception as e:print('META_FAIL',ident,repr(e));continue
+            fs=[]
+            for f in m.get('files',[]):
+              name=f.get('name',''); lo=name.lower()
+              if not lo.endswith('.pdf'):continue
+              try:s=int(f.get('size') or 0)
+              except:s=0
+              if not 100000<=s<=220000000:continue
+              src=f.get('source')
+              # Original/source scan first; then large searchable PDF. Avoid BW derivative unless necessary.
+              pen=(0 if src=='original' else 3)+(2 if lo.endswith('_text.pdf') else 0)+(3 if 'bw.pdf' in lo else 0)
+              fs.append((pen,-s,name,s,src))
+            if not fs:continue
+            fs.sort(); name=fs[0][2]
+            u='https://archive.org/download/{}/{}'.format(urllib.parse.quote(ident,safe=''),urllib.parse.quote(name,safe='/'))
+            safe=re.sub(r'[^0-9A-Za-z._ -]+','_',title).strip()[:115] or ident
+            if vol:safe+=' - Vol '+re.sub(r'[^0-9A-Za-z._ -]+','_',vol).strip()[:20]
+            out='corpus/{:03d}_{}.pdf'.format(len(done)+1,safe)
+            try:
+              rq=urllib.request.Request(u,headers={'User-Agent':UA})
+              with urllib.request.urlopen(rq,timeout=90) as r,open(out,'wb') as w:
+                while True:
+                  b=r.read(1024*1024)
+                  if not b:break
+                  w.write(b)
+              got=os.path.getsize(out)
+              if got<100000 or open(out,'rb').read(4)!=b'%PDF':raise Exception('invalid pdf')
+            except Exception as e:
+              try:os.remove(out)
+              except:pass
+              print('DL_FAIL',ident,repr(e));continue
+            keys.add(key)
+            rec={'n':len(done)+1,'identifier':ident,'title':title,'volume':vol,'creator':x.get('creator'),'date':x.get('date'),'publisher':x.get('publisher'),'source_file':name,'bytes':got,'url':u,'local':out,'score':score}
+            done.append(rec);print('OK',len(done),got,ident,title,vol)
+          with open('corpus/00_manifest.json','w',encoding='utf8') as f:json.dump(done,f,ensure_ascii=False,indent=2)
+          with open('corpus/00_manifest.tsv','w',encoding='utf8') as f:
+            f.write('n\tidentifier\ttitle\tvolume\tdate\tpublisher\tbytes\turl\n')
+            for x in done:f.write('\t'.join(str(x.get(k,'')).replace('\t',' ') for k in ['n','identifier','title','volume','date','publisher','bytes','url'])+'\n')
+          print('SUCCESS',len(done)); print('BYTES',sum(x['bytes'] for x in done))
+          if len(done)<20:raise SystemExit(2)
+          PY
+          du -sh corpus
+      - uses: actions/upload-artifact@v4
+        with:
+          name: samuel-johnson-fast-pdf-batch
+          path: corpus/
+          compression-level: 0
+          retention-days: 7
