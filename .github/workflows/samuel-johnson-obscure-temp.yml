@@ -1,0 +1,102 @@
+name: Samuel Johnson obscure and dispersed books bridge
+
+on:
+  push:
+    paths: ['.github/workflows/samuel-johnson-obscure-temp.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Search and download public-domain obscure Johnson items
+        shell: python
+        run: |
+          import json,os,re,urllib.parse,urllib.request,time
+          UA='Mozilla/5.0 (compatible; Shelfwright-SJObscure/1.0)'
+          def gj(url,t=45):
+            q=urllib.request.Request(url,headers={'User-Agent':UA})
+            with urllib.request.urlopen(q,timeout=t) as r:return json.load(r)
+          def search(q,rows=30):
+            p=urllib.parse.urlencode({'q':q,'fl[]':['identifier','title','creator','date','year','publisher','language','downloads'],'rows':rows,'output':'json','sort[]':'date asc'},doseq=True)
+            return gj('https://archive.org/advancedsearch.php?'+p).get('response',{}).get('docs',[])
+          specs=[
+            ('07-translations','A Voyage to Abyssinia (Lobo, trans. Johnson)','title:("Voyage to Abyssinia") AND mediatype:texts AND year:[1730 TO 1900]'),
+            ('03-poetry','London, a Poem','title:(London) AND creator:(Johnson) AND mediatype:texts AND year:[1738 TO 1900]'),
+            ('06-political','Marmor Norfolciense','title:("Marmor Norfolciense") AND mediatype:texts'),
+            ('06-political','A Complete Vindication of the Licensers of the Stage','title:("Vindication" "Licensers" Stage) AND mediatype:texts'),
+            ('04-biography','The Life of Mr. Richard Savage','title:("Richard Savage") AND creator:(Johnson) AND mediatype:texts AND year:[1740 TO 1900]'),
+            ('04-criticism','Miscellaneous Observations on the Tragedy of Macbeth','title:(Macbeth) AND creator:(Johnson) AND mediatype:texts AND year:[1740 TO 1900]'),
+            ('03-drama','Irene, a Tragedy','title:(Irene) AND creator:(Johnson) AND mediatype:texts AND year:[1740 TO 1900]'),
+            ('06-political','The False Alarm','title:("False Alarm") AND creator:(Johnson) AND mediatype:texts AND year:[1770 TO 1900]'),
+            ('06-political','Thoughts on the Late Transactions Respecting Falkland Islands','title:(Falkland) AND creator:(Johnson) AND mediatype:texts AND year:[1770 TO 1900]'),
+            ('06-political','The Patriot','title:(Patriot) AND creator:(Johnson) AND mediatype:texts AND year:[1770 TO 1900]'),
+            ('06-political','Taxation No Tyranny','title:("Taxation" "Tyranny") AND creator:(Johnson) AND mediatype:texts AND year:[1770 TO 1900]'),
+            ('02-essays','The Preceptor Vol. I (Johnson contribution)','identifier:preceptorcontain01dods'),
+          ]
+          exact=[
+            ('07-translations','Catalogus Bibliothecae Harleianae Vol I','catalogusbibliot01oxfo'),
+            ('07-translations','Catalogus Bibliothecae Harleianae Vol II','catalogusbibliot02oxfo'),
+            ('07-translations','Catalogus Bibliothecae Harleianae Vol III','catalogusbibliot03oxfo'),
+            ('07-translations','Catalogus Bibliothecae Harleianae Vol IV','catalogusbibliot04oxfo'),
+            ('07-translations','Catalogus Bibliothecae Harleianae Vol V','catalogusbibliot05oxfo'),
+          ]
+          chosen=[]
+          for group,label,q in specs:
+            docs=search(q)
+            # prefer items with Johnson in creator/title, public date, English, and more downloads among early scans
+            cand=[]
+            for d in docs:
+              y=str(d.get('year') or d.get('date') or '')[:4]
+              try:yi=int(y)
+              except:yi=9999
+              if yi>1929:continue
+              cr=str(d.get('creator','')).lower();ti=str(d.get('title','')).lower()
+              score=(40 if 'johnson' in cr else 0)+(10 if 'johnson' in ti else 0)+(20 if yi<=1800 else 10 if yi<=1900 else 0)+min(15,int(d.get('downloads') or 0)//100)
+              cand.append((score,-yi,d))
+            cand.sort(reverse=True,key=lambda z:(z[0],z[1]))
+            if cand:chosen.append((group,label,cand[0][2]['identifier']))
+            else:print('NO_SEARCH_RESULT',label,q)
+          chosen += exact
+          os.makedirs('out',exist_ok=True); manifest=[]
+          for group,label,ident in chosen:
+            try:m=gj('https://archive.org/metadata/'+urllib.parse.quote(ident,safe=''))
+            except Exception as e:print('META_FAIL',ident,repr(e));continue
+            fs=[]
+            for f in m.get('files',[]):
+              n=f.get('name','');lo=n.lower()
+              if not lo.endswith('.pdf'):continue
+              try:s=int(f.get('size') or 0)
+              except:s=0
+              if not 100000<=s<=300000000:continue
+              src=f.get('source');pen=(0 if src=='original' else 4)+(2 if lo.endswith('_text.pdf') else 0)+(3 if 'bw.pdf' in lo else 0)
+              fs.append((pen,-s,n,s,src))
+            if not fs:print('NO_PDF',label,ident);continue
+            fs.sort();_,_,name,size,src=fs[0]
+            folder=os.path.join('out',group);os.makedirs(folder,exist_ok=True)
+            safe=re.sub(r'[^0-9A-Za-z._ -]+','_',label).strip()+'.pdf';path=os.path.join(folder,safe)
+            url='https://archive.org/download/{}/{}'.format(urllib.parse.quote(ident,safe=''),urllib.parse.quote(name,safe='/'))
+            try:
+              q=urllib.request.Request(url,headers={'User-Agent':UA})
+              with urllib.request.urlopen(q,timeout=120) as r,open(path,'wb') as w:
+                while True:
+                  b=r.read(1024*1024)
+                  if not b:break
+                  w.write(b)
+              if os.path.getsize(path)<100000 or open(path,'rb').read(4)!=b'%PDF':raise RuntimeError('bad pdf')
+            except Exception as e:
+              try:os.remove(path)
+              except:pass
+              print('DL_FAIL',ident,repr(e));continue
+            rec={'group':group,'label':label,'identifier':ident,'title':m.get('metadata',{}).get('title'),'date':m.get('metadata',{}).get('date'),'source_file':name,'bytes':os.path.getsize(path),'url':url}
+            manifest.append(rec);print('OK',label,ident,rec['bytes'])
+          with open('out/00_manifest.json','w',encoding='utf8') as f:json.dump(manifest,f,ensure_ascii=False,indent=2)
+          print('SUCCESS',len(manifest),'of',len(chosen))
+          if len(manifest)<10:raise SystemExit(2)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: samuel-johnson-obscure-public-domain-batch
+          path: out/
+          compression-level: 0
+          retention-days: 7
