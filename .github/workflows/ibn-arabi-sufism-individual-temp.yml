@@ -1,0 +1,52 @@
+name: Ibn Arabi Sufism individual transfer
+
+on:
+  push:
+    paths: ['.github/workflows/ibn-arabi-sufism-individual-temp.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {rg: RG317, cls: A, slug: al-Ittihad-al-kawni, url: 'https://sufism.ir/library-files/ibn-arabi/ar/itthaadkawniibnarabi.pdf'}
+          - {rg: RG071, cls: A, slug: Kitab-al-Ba, url: 'https://sufism.ir/library-files/ibn-arabi/ar/kitab-al-ba.pdf'}
+          - {rg: RG205, cls: A, slug: Kitab-al-Hu, url: 'https://sufism.ir/library-files/ibn-arabi/ar/kitabho_ibnarabi.pdf'}
+          - {rg: RG064, cls: P, slug: Awrad-al-usbu-alt, url: 'https://sufism.ir/library-files/ibn-arabi/ar/orad.pdf'}
+          - {rg: RG548-RG585-RG802, cls: A, slug: al-Nuqaba-al-Qutb-Uqlat-al-mustawfiz, url: 'https://sufism.ir/library-files/ibn-arabi/ar/rasael-ibn-arabi.pdf'}
+          - {rg: RG737, cls: A, slug: Taj-al-tarajim, url: 'https://sufism.ir/library-files/ibn-arabi/ar/tarajemibnarabi.pdf'}
+          - {rg: RG834, cls: A, slug: al-Yaqin-wa-Kitab-al-Marifa-alt, url: 'https://sufism.ir/library-files/ibn-arabi/ar/yaqinma3rifa.pdf'}
+          - {rg: RG116, cls: A, slug: Dhakhair-al-alaq, url: 'https://sufism.ir/library-files/ibn-arabi/ar/zakhayerol-aavagh.pdf'}
+          - {rg: RG237, cls: A, slug: Hilyat-al-abdal, url: 'https://sufism.ir/library-files/ibn-arabi/ar/holya-tol-abdal.pdf'}
+          - {rg: RG639, cls: A, slug: Ruh-al-quds, url: 'https://sufism.ir/library-files/ibn-arabi/ar/ruhalqudos.pdf'}
+          - {rg: RG352, cls: A, slug: Kunh-ma-la-budda-lil-murid, url: 'https://sufism.ir/library-files/ibn-arabi/ar/Kunh.pdf'}
+          - {rg: RG347-1, cls: B, slug: al-Kawkab-al-durri, url: 'https://sufism.ir/library-files/ibn-arabi/ar/Kawkab_Duri.pdf'}
+          - {rg: RG002, cls: A, slug: al-Abadila, url: 'https://sufism.ir/library-files/ibn-arabi/ar/ibadala-ar.pdf'}
+          - {rg: RG762, cls: A, slug: al-Tanazzulat-al-Mawsiliyya-alt, url: 'https://sufism.ir/library-files/ibn-arabi/ar/tanazolate-elmoseliyeh.pdf'}
+          - {rg: RG380, cls: A, slug: al-Mabadi-wal-ghayat, url: 'https://sufism.ir/library-files/ibn-arabi/ar/almabadi-ar.pdf'}
+          - {rg: RG289, cls: A, slug: Insha-al-dawair, url: 'https://sufism.ir/library-files/ibn-arabi/ar/ensha-davaer.pdf'}
+          - {rg: RG247, cls: A, slug: al-Hujub, url: 'https://sufism.ir/library-files/ibn-arabi/ar/hojob.pdf'}
+          - {rg: RG354, cls: B, slug: al-Kutub, url: 'https://sufism.ir/library-files/ibn-arabi/ar/ketab-alkotob.pdf'}
+          - {rg: RG033-CANDIDATE, cls: U, slug: al-Anwar-related-Isfar, url: 'https://sufism.ir/library-files/ibn-arabi/ar/alesfar-ibn-arabi-ar.pdf'}
+    steps:
+      - name: Download and verify PDF
+        shell: bash
+        run: |
+          set -euo pipefail
+          file='${{ matrix.rg }}_${{ matrix.cls }}_${{ matrix.slug }}.pdf'
+          curl -L --fail --retry 3 --retry-delay 2 --output "$file" '${{ matrix.url }}'
+          test "$(head -c 5 "$file")" = '%PDF-'
+          sha256sum "$file"
+          ls -lh "$file"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ibn-arabi-${{ matrix.rg }}-${{ matrix.cls }}-${{ matrix.slug }}
+          path: ${{ matrix.rg }}_${{ matrix.cls }}_${{ matrix.slug }}.pdf
+          compression-level: 0
+          retention-days: 14
