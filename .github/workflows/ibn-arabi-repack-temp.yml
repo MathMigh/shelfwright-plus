@@ -23,7 +23,7 @@ jobs:
           unzip -q aggregate.zip -d corpus
           echo "PDFS=$(find corpus -type f -name '*.pdf' | wc -l)"
 
-      - name: Repack into transport chunks below connector limit
+      - name: Repack into 9 transport chunks
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -37,6 +37,7 @@ jobs:
                   groups.append(cur); cur=[]; total=0
               cur.append(p); total+=s
           if cur: groups.append(cur)
+          assert len(groups)==9, len(groups)
           os.makedirs('chunks',exist_ok=True)
           manifest=[]
           for i,g in enumerate(groups,1):
@@ -46,13 +47,26 @@ jobs:
               manifest.append({'part':i,'count':len(g),'bytes':os.path.getsize(z),'file':os.path.basename(z)})
               print('PART',i,'COUNT',len(g),'BYTES',os.path.getsize(z))
           with open('chunks/00_manifest.json','w') as f:json.dump(manifest,f,indent=2)
-          print('GROUPS',len(groups),'TOTAL_PDFS',sum(x['count'] for x in manifest))
           assert sum(x['count'] for x in manifest)==65
           PY
-      - name: Upload chunks
-        uses: actions/upload-artifact@v4
-        with:
-          name: ibn-arabi-repacked-chunks
-          path: chunks/
-          compression-level: 0
-          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-01, path: chunks/ibn-arabi-part-01.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-02, path: chunks/ibn-arabi-part-02.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-03, path: chunks/ibn-arabi-part-03.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-04, path: chunks/ibn-arabi-part-04.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-05, path: chunks/ibn-arabi-part-05.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-06, path: chunks/ibn-arabi-part-06.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-07, path: chunks/ibn-arabi-part-07.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-08, path: chunks/ibn-arabi-part-08.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-part-09, path: chunks/ibn-arabi-part-09.zip, compression-level: 0, retention-days: 7}
+      - uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-manifest, path: chunks/00_manifest.json, retention-days: 7}
