@@ -1,0 +1,118 @@
+name: Samuel Johnson canonical editions bridge
+
+on:
+  push:
+    paths: ['.github/workflows/samuel-johnson-canonical-temp.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Download canonical public-domain editions
+        shell: python
+        run: |
+          import json, os, re, urllib.parse, urllib.request
+          UA='Mozilla/5.0 (compatible; Shelfwright-SamuelJohnson-Canonical/1.0)'
+          groups={
+            'dictionary':[
+              ('Plan of a Dictionary (1747)','bim_eighteenth-century_the-plan-of-a-dictionary_johnson-samuel_1747'),
+              ('Dictionary 1755 Vol 1','b30451541_0001'),
+              ('Dictionary 1755 Vol 2','b30451541_0002'),
+            ],
+            'shakespeare':[
+              ('Shakespeare 1765 Vol 1','playsofwilliamsh01shak_1'),
+              ('Shakespeare 1765 Vol 2','playsofwilliamsh02shak_1'),
+              ('Shakespeare 1765 Vol 3','playsofwilliamsh03shak_1'),
+              ('Shakespeare 1765 Vol 4','playsofwilliamsh04shak_0'),
+              ('Shakespeare 1765 Vol 5','playsofwilliamsh05shak_0'),
+              ('Shakespeare 1765 Vol 6','playsofwilliamsh06shak_0'),
+              ('Shakespeare 1765 Vol 7','playsofwilliamsh07shak_0'),
+              ('Shakespeare 1765 Vol 8','playsofwilliamsh08shak_0'),
+            ],
+            'periodicals':[
+              ('The Rambler - four volumes (1767)','ramblerinfourvo00johngoog'),
+              ('The Idler (1767)','idler00langgoog'),
+              ('The Adventurer Vol 1 (1753)','adventurer01'),
+            ],
+            'other':[
+              ('The Vanity of Human Wishes (1749)','vanityofhumanwis00johnuoft'),
+              ('Rasselas (1800 ed.)','historyofrassela00john_3'),
+              ('Journey to the Western Islands (1791)','journeytowestern00johnuoft'),
+              ('Prayers and Meditations (1785)','prayersandmedita00johnuoft'),
+              ('Letters of Samuel Johnson Vol 1 (1892)','lettersofsamuelj01johnuoft'),
+              ('Letters of Samuel Johnson Vol 2 (1892)','lettersofsamuelj02johnuoft'),
+              ('Lives of the English Poets Vol 1 (1826)','livesofenglishpo01john'),
+              ('Lives of the English Poets Vol 2 (1826)','livesofenglishpo02john'),
+            ]
+          }
+          def gj(url,t=45):
+            q=urllib.request.Request(url,headers={'User-Agent':UA})
+            with urllib.request.urlopen(q,timeout=t) as r:return json.load(r)
+          manifests={}
+          for group,items in groups.items():
+            os.makedirs(group,exist_ok=True); done=[]
+            for label,ident in items:
+              try:m=gj('https://archive.org/metadata/'+urllib.parse.quote(ident,safe=''))
+              except Exception as e:print('META_FAIL',ident,repr(e));continue
+              fs=[]
+              for f in m.get('files',[]):
+                name=f.get('name',''); lo=name.lower()
+                if not lo.endswith('.pdf'):continue
+                try:s=int(f.get('size') or 0)
+                except:s=0
+                if s<100000 or s>350000000:continue
+                src=f.get('source')
+                # Original PDF whenever available. If IA's scan derivative is the only PDF, choose the highest-resolution/largest sensible one.
+                pen=(0 if src=='original' else 4)+(2 if lo.endswith('_text.pdf') else 0)+(3 if 'bw.pdf' in lo else 0)
+                fs.append((pen,-s,name,s,src))
+              if not fs:print('NO_PDF',ident);continue
+              fs.sort(); _,_,name,size,src=fs[0]
+              url='https://archive.org/download/{}/{}'.format(urllib.parse.quote(ident,safe=''),urllib.parse.quote(name,safe='/'))
+              safe=re.sub(r'[^0-9A-Za-z._ -]+','_',label).strip()+'.pdf'
+              out=os.path.join(group,safe)
+              try:
+                q=urllib.request.Request(url,headers={'User-Agent':UA})
+                with urllib.request.urlopen(q,timeout=120) as r,open(out,'wb') as w:
+                  while True:
+                    b=r.read(1024*1024)
+                    if not b:break
+                    w.write(b)
+                got=os.path.getsize(out)
+                with open(out,'rb') as z:magic=z.read(4)
+                if got<100000 or magic!=b'%PDF':raise RuntimeError('bad pdf')
+              except Exception as e:
+                try:os.remove(out)
+                except:pass
+                print('DL_FAIL',ident,repr(e));continue
+              rec={'label':label,'identifier':ident,'source_file':name,'bytes':got,'source':src,'url':url,'metadata':m.get('metadata',{})}
+              done.append(rec);print('OK',group,label,got,ident,name)
+            with open(os.path.join(group,'00_manifest.json'),'w',encoding='utf8') as f:json.dump(done,f,ensure_ascii=False,indent=2)
+            manifests[group]=done
+          print({k:len(v) for k,v in manifests.items()})
+          if sum(map(len,manifests.values()))<15:raise SystemExit(2)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sj-canonical-dictionary
+          path: dictionary/
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sj-canonical-shakespeare
+          path: shakespeare/
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sj-canonical-periodicals
+          path: periodicals/
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sj-canonical-other
+          path: other/
+          compression-level: 0
+          retention-days: 7
