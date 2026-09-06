@@ -35,8 +35,8 @@ jobs:
               s=re.sub(r'[^؀-ۿA-Za-z0-9 ]+',' ',s)
               return re.sub(r'\s+',' ',s).strip().lower()
 
-          # Updated MIAS 2019 A/B/P target titles represented on this library page.
           targets=[
+            ('RG548+RG585+RG802','A','القطب والنقباء وعقلة المستوفز',['القطب و النقباء و عقلة المستوفز','القطب والنقباء وعقلة المستوفز']),
             ('RG002','A','العبادلة',['العبادلة']),
             ('RG026','A','كتاب الألف وهو كتاب الأحدية',['كتاب الألف','كتاب الاحدية','الأحدية']),
             ('RG030','A','عنقاء مغرب في معرفة ختم الأولياء وشمس المغرب',['عنقاء مغرب']),
@@ -58,15 +58,12 @@ jobs:
             ('RG432','A','مشاهد الأسرار القدسية ومطالع الأنوار الإلهية',['مشاهد الأسرار']),
             ('RG443','A','مواقع النجوم ومطالع أهلة الأسرار والعلوم',['مواقع النجوم']),
             ('RG462','A','كتاب الميم والواو والنون',['كتاب الميم و الواو و النون','كتاب الميم والواو والنون']),
-            ('RG548','A','النقباء',['النقباء']),
-            ('RG585','A','القطب والإمامين',['كتاب القطب','القطب و النقباء']),
             ('RG639','A','روح القدس في مناصحة النفس',['روح القدس']),
             ('RG737','A','تاج التراجم',['تاج التراجم']),
             ('RG738','A','التجليات',['كتاب التجليات','التجليات']),
             ('RG748','P','تخميس قصيدة أبي مدين',['قصيدة شيخ الشيوخ أبي مدين','تخميس']),
             ('RG762','A','التنزلات الموصلية',['التنزلات الموصليه','تنزل الأملاك من عالم الأرواح']),
             ('RG767','A','ترجمان الأشواق',['ترجمان الأشواق']),
-            ('RG802','A','عقلة المستوفز',['عقلة المستوفز']),
             ('RG834','A','اليقين',['كتاب اليقين']),
             ('RG347.1','B','الكوكب الدري في مناقب ذي النون المصري',['الكوكب الدري']),
             ('RG354','B','الكتب',['كتاب الكتب','کتاب الکتب']),
@@ -74,14 +71,12 @@ jobs:
             ('RG064','P','أوراد الأسبوع',['اوراد','أوراد']),
           ]
 
-          r=S.get(ROOT,timeout=60); r.raise_for_status(); soup=BeautifulSoup(r.text,'lxml')
-          # Build title -> direct PDF/DOC links by walking h3 and following siblings until next h3.
+          r=S.get(ROOT,timeout=60); r.raise_for_status(); r.encoding='utf-8'
+          soup=BeautifulSoup(r.text,'lxml')
           entries=[]
           for h in soup.find_all('h3'):
               title=h.get_text(' ',strip=True)
               links=[]
-              node=h
-              # Look ahead a bounded number of nodes until next h3.
               for nxt in h.find_all_next(limit=18):
                   if nxt is not h and getattr(nxt,'name',None)=='h3': break
                   if getattr(nxt,'name',None)=='a' and nxt.get('href'):
@@ -91,45 +86,39 @@ jobs:
                       elif '.DOC' in href.upper() or txt=='DOC': links.append(('doc',href))
               if links: entries.append((title,links))
 
-          manifest=[]; seen_urls=set(); used_targets=set()
+          manifest=[]; used_targets=set()
           for title,links in entries:
               nt=norm(title)
-              matches=[]
+              if not nt: continue
+              matched=None
               for rg,cat,canon,aliases in targets:
-                  best=max([1 if norm(a) in nt or nt in norm(a) else 0 for a in aliases] or [0])
-                  if best: matches.append((rg,cat,canon))
-              if not matches: continue
-              rg,cat,canon=matches[0]
-              # Prefer PDF. DOC only is recorded for later conversion but not downloaded here.
+                  if any(norm(a) and (norm(a) in nt or nt in norm(a)) for a in aliases):
+                      matched=(rg,cat,canon); break
+              if not matched: continue
+              rg,cat,canon=matched
+              if rg in used_targets: continue
+              used_targets.add(rg)
               pdfs=[u for typ,u in links if typ=='pdf']
               if not pdfs:
                   manifest.append({'rg':rg,'class':cat,'canonical':canon,'page_title':title,'status':'DOC_ONLY','url':next((u for typ,u in links if typ=='doc'),'')})
                   continue
               url=pdfs[0]
-              if url in seen_urls: continue
-              seen_urls.add(url); used_targets.add(rg)
               safe=f'{rg}_{cat}_'+re.sub(r'[^A-Za-z0-9._-]+','_',canon)[:70]+'.pdf'
               p=out/safe
               try:
                   with S.get(url,stream=True,timeout=120) as rr:
                       rr.raise_for_status()
-                      ctype=rr.headers.get('content-type','')
                       with open(p,'wb') as f:
                           for ch in rr.iter_content(1024*1024):
                               if ch:f.write(ch)
-                  head=open(p,'rb').read(5)
-                  if head!=b'%PDF-':
-                      raise ValueError(f'not PDF header {head!r}')
-                  size=p.stat().st_size
-                  sha=hashlib.sha256(p.read_bytes()).hexdigest()
+                  if open(p,'rb').read(5)!=b'%PDF-': raise ValueError('not a PDF')
+                  size=p.stat().st_size; sha=hashlib.sha256(p.read_bytes()).hexdigest()
                   manifest.append({'rg':rg,'class':cat,'canonical':canon,'page_title':title,'status':'DOWNLOADED','url':url,'file':p.name,'bytes':size,'sha256':sha})
                   print('OK',rg,cat,size,title,url)
               except Exception as e:
                   if p.exists():p.unlink()
                   manifest.append({'rg':rg,'class':cat,'canonical':canon,'page_title':title,'status':'ERROR','url':url,'error':repr(e)})
                   print('ERR',rg,title,repr(e))
-
-          # Record targets not surfaced via direct downloadable links.
           done={x['rg'] for x in manifest}
           for rg,cat,canon,aliases in targets:
               if rg not in done: manifest.append({'rg':rg,'class':cat,'canonical':canon,'status':'NOT_DIRECT_ON_PAGE'})
@@ -140,14 +129,13 @@ jobs:
           PY
           python3 /tmp/collect.py
 
-          # Group PDFs into <=260 MiB directories so each GitHub artifact stays under connector limit.
           python3 - <<'PY'
           import os,glob,shutil,json
-          files=sorted(glob.glob('corpus/*.pdf'))
-          lim=260*1024*1024; groups=[]; cur=[]; total=0
+          files=sorted(glob.glob('corpus/*.pdf')); lim=260*1024*1024
+          groups=[];cur=[];total=0
           for p in files:
               s=os.path.getsize(p)
-              if cur and total+s>lim: groups.append(cur);cur=[];total=0
+              if cur and total+s>lim:groups.append(cur);cur=[];total=0
               cur.append(p);total+=s
           if cur:groups.append(cur)
           for i,g in enumerate(groups,1):
