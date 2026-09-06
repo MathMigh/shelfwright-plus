@@ -1,0 +1,167 @@
+name: Ibn Arabi absolute corpus discovery
+
+on:
+  push:
+    paths:
+      - '.github/workflows/ibn-arabi-absolute-discovery-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build 364-title master list and harvest public repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q requests beautifulsoup4 rapidfuzz lxml
+          cat > /tmp/discover.py <<'PY'
+          import csv, json, re, time, unicodedata
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+          from rapidfuzz import fuzz, process
+
+          OUT=Path('out'); OUT.mkdir(exist_ok=True)
+          S=requests.Session(); S.headers.update({'User-Agent':'Mozilla/5.0 corpus-research/1.0'})
+
+          def norm_ar(s):
+              s=s or ''
+              s=re.sub(r'[\u064b-\u065f\u0670\u06d6-\u06ed]', '', s)
+              s=s.translate(str.maketrans({'أ':'ا','إ':'ا','آ':'ا','ٱ':'ا','ى':'ي','ة':'ه','ؤ':'و','ئ':'ي','ـ':''}))
+              s=re.sub(r'\([^)]*\)', ' ', s)
+              s=re.sub(r'[^؀-ۿ0-9A-Za-z ]+', ' ', s)
+              s=re.sub(r'\b(كتاب|رسالة|وهو|وهي|للشيخ|الشيخ|الاكبر|محيي|الدين|ابن|عربي)\b',' ',s)
+              s=re.sub(r'\s+',' ',s).strip().lower()
+              return s
+
+          # 1) Master list: broad 364-title reconstruction (Fihris + Ijaza + historical attestations)
+          url='https://www.ibnalarabi.com/musannafat/'
+          r=S.get(url,timeout=45); r.raise_for_status()
+          soup=BeautifulSoup(r.text,'lxml')
+          rows=[]
+          for tr in soup.find_all('tr'):
+              tds=[x.get_text(' ',strip=True) for x in tr.find_all(['td','th'])]
+              if not tds: continue
+              m=re.match(r'\s*(\d+)\.?\s*$',tds[0])
+              if not m or len(tds)<2: continue
+              n=int(m.group(1)); title=tds[1].strip()
+              if 1 <= n <= 364 and title:
+                  rows.append({'n':n,'title_ar':title,'fihris':tds[2] if len(tds)>2 else '', 'ijaza':tds[3] if len(tds)>3 else '', 'notes':tds[4] if len(tds)>4 else ''})
+          # fallback regex against rendered text if table semantics differ
+          if len(rows)<300:
+              rows=[]
+              text=soup.get_text('\n',strip=True)
+              for line in text.splitlines():
+                  m=re.match(r'^(\d{1,3})\.\s*\|?\s*(.+?)\s*\|',line)
+                  if m and 1<=int(m.group(1))<=364:
+                      rows.append({'n':int(m.group(1)),'title_ar':m.group(2).strip(),'fihris':'','ijaza':'','notes':''})
+          byn={x['n']:x for x in rows}; rows=[byn[k] for k in sorted(byn)]
+          print('MASTER_TITLES',len(rows))
+          if len(rows)<350:
+              raise SystemExit(f'Failed to scrape 364-title list; got {len(rows)}')
+          with open(OUT/'master_364.csv','w',newline='',encoding='utf-8-sig') as f:
+              w=csv.DictWriter(f,fieldnames=['n','title_ar','fihris','ijaza','notes']); w.writeheader(); w.writerows(rows)
+
+          # 2) Harvest Internet Archive records likely connected with Ibn Arabi.
+          IA='https://archive.org/advancedsearch.php'
+          queries=[
+             'mediatype:texts AND creator:("ابن عربي" OR "محيي الدين ابن عربي" OR "محي الدين بن عربي")',
+             'mediatype:texts AND creator:("Ibn Arabi" OR "Ibn al-Arabi" OR "Muhyiddin Ibn Arabi" OR "Muhyi al-Din Ibn Arabi")',
+             'mediatype:texts AND title:("ابن عربي")',
+             'mediatype:texts AND title:("Ibn Arabi")'
+          ]
+          docs={}
+          for qi,q in enumerate(queries,1):
+              params={'q':q,'fl[]':['identifier','title','creator','date','language','description','downloads'],'rows':5000,'page':1,'output':'json'}
+              rr=S.get(IA,params=params,timeout=90); rr.raise_for_status()
+              js=rr.json(); part=js.get('response',{}).get('docs',[])
+              print('IA_QUERY',qi,'DOCS',len(part))
+              for d in part:
+                  ident=d.get('identifier')
+                  if ident: docs[ident]=d
+              time.sleep(.5)
+          candidates=list(docs.values())
+          print('IA_UNIQUE_RECORDS',len(candidates))
+
+          # 3) Harvest Sufism.ir Arabic Ibn Arabi library links as another public source index.
+          suf=[]
+          try:
+              su=S.get('https://sufism.ir/fa/library/ibn-arabi/',timeout=60); su.raise_for_status()
+              ss=BeautifulSoup(su.text,'lxml')
+              for a in ss.find_all('a',href=True):
+                  label=a.get_text(' ',strip=True)
+                  href=a['href']
+                  if label and ('.pdf' in href.lower() or 'download' in href.lower() or 'uploads' in href.lower()):
+                      suf.append({'title':label,'url':href})
+              print('SUFISM_LINKS',len(suf))
+          except Exception as e:
+              print('SUFISM_ERROR',repr(e))
+          with open(OUT/'sufism_public_links.csv','w',newline='',encoding='utf-8-sig') as f:
+              w=csv.DictWriter(f,fieldnames=['title','url']); w.writeheader(); w.writerows(suf)
+
+          # 4) Fuzzy map every historical title to IA candidates; strong anti-secondary penalties.
+          bad_words=['شرح','دراسة','حياة','فكر','عقيدة','موقف','الرد','تكفير','تحليل','رسالة ماجستير','اطروحة','thesis','study','studies','thought','life of','commentary']
+          cand_text=[]
+          for d in candidates:
+              t=d.get('title','')
+              if isinstance(t,list): t=' '.join(map(str,t))
+              cand_text.append(norm_ar(str(t)))
+
+          out=[]; high=[]
+          for row in rows:
+              q=norm_ar(row['title_ar'])
+              if not q: continue
+              hits=process.extract(q,cand_text,scorer=fuzz.token_set_ratio,limit=8)
+              ranked=[]
+              for _,sim,idx in hits:
+                  d=candidates[idx]; raw=str(d.get('title',''))
+                  creator=str(d.get('creator',''))
+                  score=float(sim)
+                  low=raw.lower()
+                  # author evidence
+                  if any(x in creator.lower() for x in ['ابن عربي','ibn arabi','ibn al-arabi','ibn al arabi']): score+=12
+                  elif any(x in low for x in ['ابن عربي','ibn arabi','ibn al-arabi']): score+=5
+                  # secondary-study penalty unless word belongs to original title itself
+                  for bw in bad_words:
+                      if bw in low and bw not in row['title_ar'].lower(): score-=18
+                  # exact normalized containment
+                  ct=norm_ar(raw)
+                  if q and (q in ct or ct in q) and min(len(q),len(ct))>=6: score+=14
+                  score=max(0,min(100,score))
+                  ranked.append((score,d))
+              ranked.sort(key=lambda x:x[0],reverse=True)
+              for rank,(score,d) in enumerate(ranked[:5],1):
+                  rec={'n':row['n'],'work_title_ar':row['title_ar'],'rank':rank,'score':round(score,1),'identifier':d.get('identifier',''),'candidate_title':d.get('title',''),'creator':d.get('creator',''),'date':d.get('date',''),'language':d.get('language',''),'downloads':d.get('downloads','')}
+                  out.append(rec)
+                  if rank==1 and score>=82: high.append(rec)
+          with open(OUT/'ia_candidates_top5.csv','w',newline='',encoding='utf-8-sig') as f:
+              fields=['n','work_title_ar','rank','score','identifier','candidate_title','creator','date','language','downloads']
+              w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(out)
+          with open(OUT/'high_confidence_ia.csv','w',newline='',encoding='utf-8-sig') as f:
+              fields=['n','work_title_ar','rank','score','identifier','candidate_title','creator','date','language','downloads']
+              w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(high)
+
+          summary={'master_titles':len(rows),'ia_unique_records':len(candidates),'high_confidence_matches':len(high),'sufism_links':len(suf),'source_master':url}
+          (OUT/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(summary,ensure_ascii=False))
+          PY
+          python3 /tmp/discover.py
+          echo '--- HIGH CONFIDENCE PREVIEW ---'
+          python3 - <<'PY'
+          import csv
+          r=list(csv.DictReader(open('out/high_confidence_ia.csv',encoding='utf-8-sig')))
+          print('COUNT',len(r))
+          for x in r[:80]: print(x['n'],x['score'],x['work_title_ar'],'=>',x['identifier'],'|',x['candidate_title'])
+          PY
+
+      - name: Upload discovery manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibn-arabi-absolute-discovery
+          path: out/
+          compression-level: 6
+          retention-days: 14
