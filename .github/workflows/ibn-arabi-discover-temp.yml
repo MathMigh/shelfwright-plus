@@ -1,0 +1,46 @@
+name: Ibn Arabi Arabic discovery bridge
+
+on:
+  push:
+    paths:
+      - '.github/workflows/ibn-arabi-discover-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Enumerate Internet Archive Arabic candidates
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, urllib.parse, urllib.request
+          UA='Mozilla/5.0 (compatible; Shelfwright-IbnArabi-Discovery/1.0)'
+          qs=[
+            'mediatype:texts AND language:ara AND creator:"محيي الدين بن عربي"',
+            'mediatype:texts AND language:ara AND creator:"محي الدين بن عربي"',
+            'mediatype:texts AND language:ara AND creator:"محيي الدين ابن عربي"',
+            'mediatype:texts AND language:ara AND creator:"ابن عربي"',
+            'mediatype:texts AND language:ara AND creator:"Ibn Arabi"',
+            'mediatype:texts AND language:ara AND title:"ابن عربي"'
+          ]
+          seen=set(); out=[]
+          for q in qs:
+            p=urllib.parse.urlencode({'q':q,'fl[]':['identifier','title','creator','language'],'rows':200,'page':1,'output':'json','sort[]':'downloads desc'},doseq=True)
+            req=urllib.request.Request('https://archive.org/advancedsearch.php?'+p,headers={'User-Agent':UA})
+            try:
+              with urllib.request.urlopen(req,timeout=45) as r: js=json.load(r)
+            except Exception as e:
+              print('QFAIL',q,repr(e)); continue
+            ds=js.get('response',{}).get('docs',[]); print('QCOUNT',len(ds),q)
+            for d in ds:
+              i=d.get('identifier')
+              if i and i not in seen:
+                seen.add(i); out.append(d)
+          print('UNIQUE',len(out))
+          for n,d in enumerate(out[:150],1):
+            print('CAND\t%03d\t%s\t%s\t%s' % (n,d.get('identifier',''),str(d.get('title','')).replace('\t',' '),str(d.get('creator','')).replace('\t',' ')))
+          PY
