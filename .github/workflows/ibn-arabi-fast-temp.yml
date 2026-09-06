@@ -1,0 +1,100 @@
+name: Ibn Arabi Arabic fast bridge
+
+on:
+  push:
+    paths: ['.github/workflows/ibn-arabi-fast-temp.yml']
+permissions:
+  contents: read
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download compact public Arabic PDFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p corpus
+          python3 - <<'PY'
+          import json, os, re, urllib.parse, urllib.request, unicodedata
+          UA='Mozilla/5.0 (compatible; Shelfwright-IbnArabi-Fast/1.0)'
+          def gj(u,t=40):
+            q=urllib.request.Request(u,headers={'User-Agent':UA})
+            with urllib.request.urlopen(q,timeout=t) as r:return json.load(r)
+          qs=[
+           'mediatype:texts AND language:ara AND creator:"محيي الدين بن عربي"',
+           'mediatype:texts AND language:ara AND creator:"محي الدين بن عربي"',
+           'mediatype:texts AND language:ara AND creator:"محيي الدين ابن عربي"',
+           'mediatype:texts AND language:ara AND creator:"ابن عربي"',
+           'mediatype:texts AND language:ara AND creator:"Ibn Arabi"',
+           'mediatype:texts AND language:ara AND title:"ابن عربي"']
+          docs=[]; ids=set()
+          for q in qs:
+            p=urllib.parse.urlencode({'q':q,'fl[]':['identifier','title','creator','language'],'rows':200,'output':'json','sort[]':'downloads desc'},doseq=True)
+            try:d=gj('https://archive.org/advancedsearch.php?'+p)['response']['docs']
+            except Exception as e: print('SEARCH_FAIL',repr(e)); continue
+            for x in d:
+              i=x.get('identifier')
+              if i and i not in ids:ids.add(i);docs.append(x)
+          print('CANDIDATES',len(docs))
+          arab=re.compile(r'[\u0600-\u06FF]')
+          bad=('دراسة','رسالة ماجستير','أطروحة','حول ابن عربي','فكر ابن عربي','فلسفة ابن عربي','القاشاني','الشعراني')
+          def nrm(s):
+            s=unicodedata.normalize('NFKC',str(s or '')).lower().strip()
+            return re.sub(r'[\s\-_–—:،,.;؛]+',' ',s)
+          ranked=[]
+          for x in docs:
+            t=str(x.get('title') or ''); c=' '.join(x.get('creator') if isinstance(x.get('creator'),list) else [str(x.get('creator') or '')])
+            if any(z in nrm(t) for z in bad):continue
+            nc=nrm(c); score=(10 if ('ابن عربي' in nc or 'بن عربي' in nc or 'ibn arabi' in nc) else 0)+(3 if arab.search(t) else 0)
+            ranked.append((score,x))
+          ranked.sort(key=lambda z:z[0],reverse=True)
+          done=[]; titles=set()
+          for score,x in ranked:
+            if len(done)>=52:break
+            ident=x['identifier']; title=str(x.get('title') or ident); nt=nrm(title)
+            if nt in titles:continue
+            try:m=gj('https://archive.org/metadata/'+urllib.parse.quote(ident,safe=''))
+            except:continue
+            fs=[]
+            for f in m.get('files',[]):
+              name=f.get('name',''); lo=name.lower()
+              if not lo.endswith('.pdf'):continue
+              try:s=int(f.get('size') or 0)
+              except:s=0
+              if not 80000<=s<=80000000:continue
+              # prefer original/main PDF, then searchable derivative
+              pen=(2 if lo.endswith('_text.pdf') else 0)+(1 if 'bw.pdf' in lo else 0)
+              fs.append((pen,-s,name,s))
+            if not fs:continue
+            fs.sort(); name=fs[0][2]
+            u='https://archive.org/download/{}/{}'.format(urllib.parse.quote(ident,safe=''),urllib.parse.quote(name,safe='/'))
+            safe=re.sub(r'[^0-9A-Za-z\u0600-\u06FF._ -]+','_',title).strip()[:130] or ident
+            out='corpus/{:03d}_{}.pdf'.format(len(done)+1,safe)
+            try:
+              rq=urllib.request.Request(u,headers={'User-Agent':UA})
+              with urllib.request.urlopen(rq,timeout=60) as r,open(out,'wb') as w:
+                while True:
+                  b=r.read(1024*1024)
+                  if not b:break
+                  w.write(b)
+              got=os.path.getsize(out)
+              if got<80000:raise Exception('small')
+            except Exception as e:
+              try:os.remove(out)
+              except:pass
+              print('FAIL',ident,repr(e));continue
+            titles.add(nt);done.append({'n':len(done)+1,'id':ident,'title':title,'creator':x.get('creator'),'bytes':got,'url':u,'file':out})
+            print('OK',len(done),got,ident,title)
+          with open('corpus/00_manifest.json','w',encoding='utf-8') as f:json.dump(done,f,ensure_ascii=False,indent=2)
+          print('SUCCESS',len(done))
+          if len(done)<50:raise SystemExit(2)
+          PY
+          echo "COUNT=$(find corpus -type f -name '*.pdf' | wc -l)"
+          du -sh corpus
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ibn-arabi-arabic-fast-batch
+          path: corpus/
+          compression-level: 0
+          retention-days: 7
