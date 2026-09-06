@@ -1,0 +1,64 @@
+name: Ibn Arabi Arabic corpus bridge
+
+on:
+  push:
+    paths:
+      - '.github/workflows/ibn-arabi-corpus-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Collect publicly downloadable Arabic source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p corpus
+          PAGE='https://sufism.ir/fa/library/ibn-arabi/'
+          curl -L --fail --retry 4 --connect-timeout 20 "$PAGE" -o page.html
+          python3 - <<'PY'
+          import html, re, urllib.parse
+          s=open('page.html','r',encoding='utf-8',errors='ignore').read()
+          s=html.unescape(s)
+          urls=[]
+          for m in re.finditer(r'''(?:href|src)=["']([^"']+)["']''', s, re.I):
+              u=urllib.parse.urljoin('https://sufism.ir/fa/library/ibn-arabi/', m.group(1))
+              lo=u.lower().split('?')[0]
+              if '/library-files/ibn-arabi/' in lo and lo.endswith(('.pdf','.doc','.docx','.zip')):
+                  if u not in urls: urls.append(u)
+          open('urls.txt','w').write('\n'.join(urls)+'\n')
+          print('discovered',len(urls),'download links')
+          PY
+          : > manifest.tsv
+          n=0
+          while IFS= read -r url; do
+            [ -n "$url" ] || continue
+            n=$((n+1))
+            base="$(python3 -c 'import sys,urllib.parse,os; print(os.path.basename(urllib.parse.urlparse(sys.argv[1]).path) or ("item-%03d"%int(sys.argv[2])))' "$url" "$n")"
+            out="corpus/$(printf '%03d' "$n")_$base"
+            if curl -L --fail --retry 3 --connect-timeout 20 --max-time 240 "$url" -o "$out"; then
+              bytes=$(stat -c %s "$out")
+              printf '%03d\t%s\t%s\t%s\n' "$n" "$bytes" "$out" "$url" >> manifest.tsv
+            else
+              rm -f "$out"
+              printf '%03d\tFAILED\t%s\t%s\n' "$n" "$out" "$url" >> manifest.tsv
+            fi
+          done < urls.txt
+          cp manifest.tsv corpus/00_manifest.tsv
+          printf 'SUCCESSFUL_FILES=' >> "$GITHUB_ENV"
+          find corpus -maxdepth 1 -type f ! -name '00_manifest.tsv' | wc -l | tr -d ' ' >> "$GITHUB_ENV"
+          echo "Downloaded files: $(find corpus -maxdepth 1 -type f ! -name '00_manifest.tsv' | wc -l)"
+          du -sh corpus
+
+      - name: Upload corpus artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibn-arabi-arabic-source-batch
+          path: corpus/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
