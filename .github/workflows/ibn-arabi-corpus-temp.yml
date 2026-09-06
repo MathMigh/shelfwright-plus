@@ -49,8 +49,6 @@ jobs:
             fi
           done < urls.txt
           cp manifest.tsv corpus/00_manifest.tsv
-          printf 'SUCCESSFUL_FILES=' >> "$GITHUB_ENV"
-          find corpus -maxdepth 1 -type f ! -name '00_manifest.tsv' | wc -l | tr -d ' ' >> "$GITHUB_ENV"
           echo "Downloaded files: $(find corpus -maxdepth 1 -type f ! -name '00_manifest.tsv' | wc -l)"
           du -sh corpus
 
@@ -62,3 +60,5 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
+# trigger: 2
