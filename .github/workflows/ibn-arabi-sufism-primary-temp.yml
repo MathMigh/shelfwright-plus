@@ -1,0 +1,182 @@
+name: Ibn Arabi verified Arabic corpus from Sufism library
+
+on:
+  push:
+    paths:
+      - '.github/workflows/ibn-arabi-sufism-primary-temp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Harvest and download verified A/B/P Arabic PDFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install -q requests beautifulsoup4 lxml
+          cat > /tmp/collect.py <<'PY'
+          import os,re,json,hashlib,requests
+          from pathlib import Path
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin
+
+          ROOT='https://sufism.ir/fa/library/ibn-arabi/'
+          out=Path('corpus'); out.mkdir(exist_ok=True)
+          S=requests.Session(); S.headers.update({'User-Agent':'Mozilla/5.0 corpus-research/1.0'})
+
+          def norm(s):
+              s=s or ''
+              s=re.sub(r'[\u064b-\u065f\u0670\u06d6-\u06ed]','',s)
+              s=s.translate(str.maketrans({'أ':'ا','إ':'ا','آ':'ا','ٱ':'ا','ى':'ي','ة':'ه','ؤ':'و','ئ':'ي','ـ':''}))
+              s=re.sub(r'[^؀-ۿA-Za-z0-9 ]+',' ',s)
+              return re.sub(r'\s+',' ',s).strip().lower()
+
+          # Updated MIAS 2019 A/B/P target titles represented on this library page.
+          targets=[
+            ('RG002','A','العبادلة',['العبادلة']),
+            ('RG026','A','كتاب الألف وهو كتاب الأحدية',['كتاب الألف','كتاب الاحدية','الأحدية']),
+            ('RG030','A','عنقاء مغرب في معرفة ختم الأولياء وشمس المغرب',['عنقاء مغرب']),
+            ('RG033','A','الأنوار',['رسالة الأنوار']),
+            ('RG071','A','كتاب الباء',['كتاب الباء']),
+            ('RG116','A','ذخائر الأعلاق في شرح ترجمان الأشواق',['ذخائر الاعلاق']),
+            ('RG125','A','الفناء في المشاهدة',['الفناء في المشاهدة']),
+            ('RG150','A','فصوص الحكم',['فصوص الحكم']),
+            ('RG169','A','كتاب الجلالة',['كتاب الجلالة']),
+            ('RG205','A','كتاب الهو',['كتاب الهو']),
+            ('RG237','A','حلية الأبدال',['حلية الابدال']),
+            ('RG247','A','الحجب',['حجب','الحجب']),
+            ('RG289','A','إنشاء الدوائر',['انشاء الدوائر','إنشاء الدوائر']),
+            ('RG307','A','الإسفار عن نتائج الأسفار',['الإسفار عن نتائج الأسفار','كتاب الإسفار']),
+            ('RG313','A','الإسرا إلى المقام الأسرى',['كتاب الإسرا','الإسرا']),
+            ('RG317','A','الاتحاد الكوني في حضرة الإشهاد العيني',['الاتحاد الكوني']),
+            ('RG352','A','كنه ما لابد للمريد منه',['كنه ما لابد للمريد منه']),
+            ('RG380','A','المبادئ والغايات في معاني الحروف والآيات',['المبادي و الغايات','المبادئ والغايات']),
+            ('RG432','A','مشاهد الأسرار القدسية ومطالع الأنوار الإلهية',['مشاهد الأسرار']),
+            ('RG443','A','مواقع النجوم ومطالع أهلة الأسرار والعلوم',['مواقع النجوم']),
+            ('RG462','A','كتاب الميم والواو والنون',['كتاب الميم و الواو و النون','كتاب الميم والواو والنون']),
+            ('RG548','A','النقباء',['النقباء']),
+            ('RG585','A','القطب والإمامين',['كتاب القطب','القطب و النقباء']),
+            ('RG639','A','روح القدس في مناصحة النفس',['روح القدس']),
+            ('RG737','A','تاج التراجم',['تاج التراجم']),
+            ('RG738','A','التجليات',['كتاب التجليات','التجليات']),
+            ('RG748','P','تخميس قصيدة أبي مدين',['قصيدة شيخ الشيوخ أبي مدين','تخميس']),
+            ('RG762','A','التنزلات الموصلية',['التنزلات الموصليه','تنزل الأملاك من عالم الأرواح']),
+            ('RG767','A','ترجمان الأشواق',['ترجمان الأشواق']),
+            ('RG802','A','عقلة المستوفز',['عقلة المستوفز']),
+            ('RG834','A','اليقين',['كتاب اليقين']),
+            ('RG347.1','B','الكوكب الدري في مناقب ذي النون المصري',['الكوكب الدري']),
+            ('RG354','B','الكتب',['كتاب الكتب','کتاب الکتب']),
+            ('RG493','B','محاضرة الأبرار ومسامرة الأخيار',['محاضرة الابرار','محاضرة الأبرار']),
+            ('RG064','P','أوراد الأسبوع',['اوراد','أوراد']),
+          ]
+
+          r=S.get(ROOT,timeout=60); r.raise_for_status(); soup=BeautifulSoup(r.text,'lxml')
+          # Build title -> direct PDF/DOC links by walking h3 and following siblings until next h3.
+          entries=[]
+          for h in soup.find_all('h3'):
+              title=h.get_text(' ',strip=True)
+              links=[]
+              node=h
+              # Look ahead a bounded number of nodes until next h3.
+              for nxt in h.find_all_next(limit=18):
+                  if nxt is not h and getattr(nxt,'name',None)=='h3': break
+                  if getattr(nxt,'name',None)=='a' and nxt.get('href'):
+                      href=urljoin(ROOT,nxt['href'])
+                      txt=nxt.get_text(' ',strip=True).upper()
+                      if '.PDF' in href.upper() or txt=='PDF': links.append(('pdf',href))
+                      elif '.DOC' in href.upper() or txt=='DOC': links.append(('doc',href))
+              if links: entries.append((title,links))
+
+          manifest=[]; seen_urls=set(); used_targets=set()
+          for title,links in entries:
+              nt=norm(title)
+              matches=[]
+              for rg,cat,canon,aliases in targets:
+                  best=max([1 if norm(a) in nt or nt in norm(a) else 0 for a in aliases] or [0])
+                  if best: matches.append((rg,cat,canon))
+              if not matches: continue
+              rg,cat,canon=matches[0]
+              # Prefer PDF. DOC only is recorded for later conversion but not downloaded here.
+              pdfs=[u for typ,u in links if typ=='pdf']
+              if not pdfs:
+                  manifest.append({'rg':rg,'class':cat,'canonical':canon,'page_title':title,'status':'DOC_ONLY','url':next((u for typ,u in links if typ=='doc'),'')})
+                  continue
+              url=pdfs[0]
+              if url in seen_urls: continue
+              seen_urls.add(url); used_targets.add(rg)
+              safe=f'{rg}_{cat}_'+re.sub(r'[^A-Za-z0-9._-]+','_',canon)[:70]+'.pdf'
+              p=out/safe
+              try:
+                  with S.get(url,stream=True,timeout=120) as rr:
+                      rr.raise_for_status()
+                      ctype=rr.headers.get('content-type','')
+                      with open(p,'wb') as f:
+                          for ch in rr.iter_content(1024*1024):
+                              if ch:f.write(ch)
+                  head=open(p,'rb').read(5)
+                  if head!=b'%PDF-':
+                      raise ValueError(f'not PDF header {head!r}')
+                  size=p.stat().st_size
+                  sha=hashlib.sha256(p.read_bytes()).hexdigest()
+                  manifest.append({'rg':rg,'class':cat,'canonical':canon,'page_title':title,'status':'DOWNLOADED','url':url,'file':p.name,'bytes':size,'sha256':sha})
+                  print('OK',rg,cat,size,title,url)
+              except Exception as e:
+                  if p.exists():p.unlink()
+                  manifest.append({'rg':rg,'class':cat,'canonical':canon,'page_title':title,'status':'ERROR','url':url,'error':repr(e)})
+                  print('ERR',rg,title,repr(e))
+
+          # Record targets not surfaced via direct downloadable links.
+          done={x['rg'] for x in manifest}
+          for rg,cat,canon,aliases in targets:
+              if rg not in done: manifest.append({'rg':rg,'class':cat,'canonical':canon,'status':'NOT_DIRECT_ON_PAGE'})
+          Path('manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
+          good=[x for x in manifest if x.get('status')=='DOWNLOADED']
+          print('DOWNLOADED_PDFS',len(good),'TOTAL_BYTES',sum(x['bytes'] for x in good))
+          print('RGs',','.join(x['rg'] for x in good))
+          PY
+          python3 /tmp/collect.py
+
+          # Group PDFs into <=260 MiB directories so each GitHub artifact stays under connector limit.
+          python3 - <<'PY'
+          import os,glob,shutil,json
+          files=sorted(glob.glob('corpus/*.pdf'))
+          lim=260*1024*1024; groups=[]; cur=[]; total=0
+          for p in files:
+              s=os.path.getsize(p)
+              if cur and total+s>lim: groups.append(cur);cur=[];total=0
+              cur.append(p);total+=s
+          if cur:groups.append(cur)
+          for i,g in enumerate(groups,1):
+              d=f'group{i:02d}';os.makedirs(d,exist_ok=True)
+              for p in g:shutil.copy2(p,d+'/'+os.path.basename(p))
+              print('GROUP',i,'FILES',len(g),'BYTES',sum(os.path.getsize(x) for x in g))
+          open('groups.json','w').write(json.dumps({'count':len(groups)},indent=2))
+          PY
+
+      - name: Upload group 01
+        if: ${{ hashFiles('group01/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-sufism-primary-01, path: group01/, compression-level: 0, retention-days: 14}
+      - name: Upload group 02
+        if: ${{ hashFiles('group02/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-sufism-primary-02, path: group02/, compression-level: 0, retention-days: 14}
+      - name: Upload group 03
+        if: ${{ hashFiles('group03/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-sufism-primary-03, path: group03/, compression-level: 0, retention-days: 14}
+      - name: Upload group 04
+        if: ${{ hashFiles('group04/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-sufism-primary-04, path: group04/, compression-level: 0, retention-days: 14}
+      - name: Upload group 05
+        if: ${{ hashFiles('group05/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-sufism-primary-05, path: group05/, compression-level: 0, retention-days: 14}
+      - name: Upload manifest
+        uses: actions/upload-artifact@v4
+        with: {name: ibn-arabi-sufism-primary-manifest, path: manifest.json, retention-days: 14}
